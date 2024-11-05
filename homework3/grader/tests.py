@@ -243,7 +243,8 @@ class RoadDetectorGrader(BaseGrader):
         score = normalized_score(val, self.RANGE_TP_DEPTH[1], self.RANGE_TP_DEPTH[2])
 
         # Boosting IoU will allow for true positives
-        assert val > 1e-2, "Model does not detect any true positives"
+        # assert val > 1e-2, "Model does not detect any true positives"
+        assert self._metric_computer.tp_depth_error_n > 100, "Model does not detect enough true positives"
 
         # lower is better
         score = 1 - score
