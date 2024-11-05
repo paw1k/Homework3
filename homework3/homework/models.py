@@ -26,8 +26,31 @@ class Classifier(nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # TODO: implement
-        pass
+        # Define the convolutional layers
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),  # Conv1
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # Conv2
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # Conv3
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # Conv4
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+        )
+        # Global Average Pooling layer
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))  # Reduces to (B, 256, 1, 1)
+
+        # Fully connected layer to map features to num_classes
+        self.fc_layers = nn.Sequential(
+            nn.Flatten(),  # Flatten the (B, 256, 1, 1) -> (B, 256)
+            nn.Linear(256, num_classes)  # Fully connected layer (256 -> num_classes)
+        )
+
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -40,8 +63,14 @@ class Classifier(nn.Module):
         # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 6)
+        # Pass through convolutional layers
+        z = self.conv_layers(z)
+
+        # Global average pooling (reduce spatial dimensions)
+        z = self.global_avg_pool(z)
+
+        # Pass through fully connected layers
+        logits = self.fc_layers(z)
 
         return logits
 
@@ -78,8 +107,42 @@ class Detector(torch.nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # TODO: implement
-        pass
+        # Down-sampling layers
+        self.down1 = self.conv_block(in_channels, 16)  # (B, 3) -> (B, 16, 48, 64)
+        self.down2 = self.conv_block(16, 32)  # (B, 16, 48, 64) -> (B, 32, 24, 32)
+        self.down3 = self.conv_block(32, 64)  # (B, 32, 24, 32) -> (B, 64, 12, 16)
+        self.down4 = self.conv_block(64, 128)  # (B, 64, 12, 16) -> (B, 128, 6, 8)
+        self.down5 = self.conv_block(128, 256)  # New Layer: (B, 128, 6, 8) -> (B, 256, 3, 4)
+
+        # Up-sampling layers
+        self.up1 = self.upconv_block(256, 128)  # (B, 256, 3, 4) -> (B, 128, 6, 8)
+        self.up2 = self.upconv_block(128 + 128, 64)  # (B, 128 + 128, 6, 8) -> (B, 64, 12, 16)
+        self.up3 = self.upconv_block(64 + 64, 32)  # (B, 64 + 64, 12, 16) -> (B, 32, 24, 32)
+        self.up4 = self.upconv_block(32 + 32, 16)  # (B, 32 + 32, 24, 32) -> (B, 16, 48, 64)
+        self.up5 = self.upconv_block(16 + 16, 16)  # New Layer: (B, 16 + 16, 48, 64) -> (B, 16, 96, 128)
+
+        # Output layers
+        self.logits = nn.Conv2d(16, num_classes, kernel_size=1)  # Output: (B, num_classes, 96, 128)
+        self.depth = nn.Conv2d(16, 1, kernel_size=1)
+
+    def conv_block(self, in_channels, out_channels):
+        """Define a convolutional block with BatchNorm and ReLU."""
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5)  # Example dropout layer
+        )
+
+    def upconv_block(self, in_channels, out_channels):
+        """Define an up-convolutional block with BatchNorm and ReLU."""
+        return nn.Sequential(
+            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -97,11 +160,31 @@ class Detector(torch.nn.Module):
         # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 3, x.size(2), x.size(3))
-        raw_depth = torch.rand(x.size(0), x.size(2), x.size(3))
+        # Down-sampling path
+        down1_out = self.down1(z)  # (B, 16, 48, 64)
+        down2_out = self.down2(down1_out)  # (B, 32, 24, 32)
+        down3_out = self.down3(down2_out)  # (B, 64, 12, 16)
+        down4_out = self.down4(down3_out)  # (B, 128, 6, 8)
+        down5_out = self.down5(down4_out)  # (B, 256, 3, 4)
 
-        return logits, raw_depth
+        # Up-sampling path with skip connections
+        up1_out = self.up1(down5_out)  # (B, 128, 6, 8)
+        up1_out = torch.cat([up1_out, down4_out], dim=1)  # Concatenate with skip connection
+        up2_out = self.up2(up1_out)  # (B, 64, 12, 16)
+        up2_out = torch.cat([up2_out, down3_out], dim=1)  # Concatenate with skip connection
+        up3_out = self.up3(up2_out)  # (B, 32, 24, 32)
+        up3_out = torch.cat([up3_out, down2_out], dim=1)  # Concatenate with skip connection
+        up4_out = self.up4(up3_out)  # (B, 16, 48, 64)
+        up4_out = torch.cat([up4_out, down1_out], dim=1)  # Concatenate with skip connection
+        up5_out = self.up5(up4_out)  # (B, 16, 96, 128)
+
+        # Final output layers
+        logits = self.logits(up5_out)  # (B, num_classes, 96, 128)
+        raw_depth = self.depth(up5_out)  # (B, 1, 96, 128)
+
+        depth = raw_depth.squeeze(1)  # (B, 96, 128)
+
+        return logits, depth
 
     def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
